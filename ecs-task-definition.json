@@ -1,0 +1,69 @@
+{
+  "family": "rag-mcp-server",
+  "containerDefinitions": [
+    {
+      "name": "rag-mcp-server-container",
+      "image": "<YOUR_AWS_ACCOUNT_ID>.dkr.ecr.<YOUR_REGION>.amazonaws.com/rag-mcp-server:latest",
+      "cpu": 1024,
+      "memory": 2048,
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "hostPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "OPENAI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:<YOUR_REGION>:<YOUR_AWS_ACCOUNT_ID>:secret:<YOUR_SECRET_NAME>-xxxxxx"
+        },
+        {
+          "name": "DOCUMENTS_S3_BUCKET",
+          "value": "<YOUR_S3_BUCKET_NAME>"
+        },
+        {
+          "name": "CHROMA_HOST",
+          "value": "<IP_OR_DNS_OF_CHROMA_SERVICE>"
+        },
+        {
+          "name": "CHROMA_PORT",
+          "value": "8000"
+        },
+        {
+          "name": "CHROMA_COLLECTION",
+          "value": "documents"
+        },
+        {
+          "name": "OPENAI_EMBEDDING_MODEL",
+          "value": "text-embedding-ada-002"
+        },
+        {
+          "name": "OPENAI_CHAT_MODEL",
+          "value": "gpt-3.5-turbo"
+        },
+        {
+          "name": "AWS_REGION",
+          "value": "<YOUR_REGION>"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/rag-mcp-server",
+          "awslogs-region": "<YOUR_REGION>",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ],
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "networkMode": "awsvpc",
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::<YOUR_AWS_ACCOUNT_ID>:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::<YOUR_AWS_ACCOUNT_ID>:role/<YOUR_CUSTOM_TASK_ROLE>"
+}

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-mcp-server"
+version = "0.1.0"
+description = "RAG MCP Server using ChromaDB - Cloud Ready"
+requires-python = ">=3.8"
+dependencies = [
+    "fastapi==0.111.0",
+    "uvicorn[standard]==0.29.0",
+    "chromadb==0.5.0",
+    "openai==1.25.1",
+    "python-dotenv==1.0.1",
+    "boto3==1.34.96",
+    "pydantic-settings==2.2.1",
+    # Add other core dependencies from requirements.txt if they exist
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.2.1",
+    "httpx==0.27.0",
+    "aws-cdk-lib>=2.100.0",
+    "constructs>=10.0.0",
+    "pytest-asyncio==0.23.7",
+]
+
+[tool.setuptools]
+packages = ["src"]
+
+[tool.black]
+line-length = 88
+
+[tool.isort]
+profile = "black"
