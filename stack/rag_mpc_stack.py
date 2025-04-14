@@ -30,10 +30,18 @@ class RagMcpStack(Stack):
         openai_embedding_model = "text-embedding-ada-002"
         openai_chat_model = "gpt-3.5-turbo"
 
-        # --- Secrets Manager ---
+        # --- Secrets --- # Group secrets together
+        # OpenAI API Key Secret
         openai_secret = secretsmanager.Secret.from_secret_name_v2(
             self, "OpenAiApiKeySecret",
             secret_name=openai_secret_name
+        )
+        # Application API Key Secret (User needs to create this manually)
+        # Ensure this secret exists in the target region before deploying!
+        app_api_key_secret_name = "AI/MCP_SERVERS/RAG_SERVER_API_KEY" # <-- User specified name
+        app_api_key_secret = secretsmanager.Secret.from_secret_name_v2(
+            self, "AppApiKeySecret",
+            secret_name=app_api_key_secret_name
         )
 
         # --- S3 Bucket ---
@@ -58,54 +66,33 @@ class RagMcpStack(Stack):
 
         # --- OpenSearch Serverless Collection ---
         # Data Access Policy for Lambda
-        lambda_access_policy_name = f"{app_name}-lambda-access"
+        # Shorten name to comply with ^[a-z][a-z0-9-]{2,31}$ (max 32 chars)
+        lambda_access_policy_name = f"{app_name}-data-pol"
         lambda_access_policy = opensearchserverless.CfnAccessPolicy(
             self, "LambdaAccessPolicy",
             name=lambda_access_policy_name,
             type="data",
+            # Simplify policy to only grant necessary index permissions
             policy=json.dumps([
                 {
                     "Rules": [
+                        # Removed invalid collection-level rule
                         {
-                            "ResourceType": f"collection/{opensearch_collection_name}",
-                            "Permission": [
-                                "aoss:CreateCollectionItems", # For setup? Not typically needed by Lambda
-                                "aoss:DescribeCollectionItems", # To check status?
-                                "aoss:UpdateCollectionItems" # If needed
-                            ],
-                            "Resource": [f"collection/{opensearch_collection_name}"]
-                        },
-                        {
-                             "ResourceType": "index",
-                             "Resource": [f"index/{opensearch_collection_name}/{opensearch_index_name}*"], # Grant access to the specific index pattern
-                             "Permission": [
-                                 "aoss:*" # Grant all index permissions for simplicity, refine if needed
-                                #  "aoss:CreateIndex",
-                                #  "aoss:DeleteIndex",
-                                #  "aoss:UpdateIndex",
-                                #  "aoss:DescribeIndex",
-                                #  "aoss:ReadDocument",
-                                #  "aoss:WriteDocument"
-                            ]
+                             "ResourceType": "index", # Must be literal "index"
+                             "Resource": [f"index/{opensearch_collection_name}/{opensearch_index_name}*"],
+                             "Permission": ["aoss:*"] # Grant broad index permissions for simplicity
                         }
                     ],
-                    "Principal": [
-                        # We will add the Lambda Role ARN here later after creating the role
-                        # Need to use escape hatches or custom resources if there's a circular dependency
-                        # For now, leave it placeholder - will require manual update or second deploy typically
-                        "PLACEHOLDER_LAMBDA_ROLE_ARN"
-                    ],
-                    "Description": "Policy granting Lambda access to the OpenSearch collection and index"
+                    # Placeholder updated below after role creation
+                    "Principal": ["PLACEHOLDER_LAMBDA_ROLE_ARN"],
+                    "Description": "Policy granting Lambda index access"
                 }
             ])
         )
-        # Add dependency if needed - policy needs collection to exist if using collection name in Resource?
-        # lambda_access_policy.add_dependency(collection) # This won't work directly with Cfn resources like this
 
-        # Network Access Policy (Allow VPC access if Lambda runs in VPC, or public if not)
-        # For simplicity now, allow public access (Not recommended for production)
-        # If Lambda needs VPC access to reach OpenSearch, configure VPC endpoint & policy
-        network_policy_name = f"{app_name}-network-policy"
+        # Network Access Policy
+        # Shorten name to comply with constraints
+        network_policy_name = f"{app_name}-net-pol"
         network_policy = opensearchserverless.CfnSecurityPolicy(
             self, "NetworkPolicy",
             name=network_policy_name,
@@ -124,8 +111,9 @@ class RagMcpStack(Stack):
             ])
         )
 
-        # Encryption Policy (Using AWS owned key is default and simplest)
-        encryption_policy_name = f"{app_name}-encryption-policy"
+        # Encryption Policy
+        # Shorten name to comply with constraints
+        encryption_policy_name = f"{app_name}-enc-pol"
         encryption_policy = opensearchserverless.CfnSecurityPolicy(
             self, "EncryptionPolicy",
             name=encryption_policy_name,
@@ -184,9 +172,22 @@ class RagMcpStack(Stack):
                 ),
                 "SecretAccessPolicy": iam.PolicyDocument(
                      statements=[
+                        # Grant access to OpenAI secret (both base ARN and wildcard ARN)
                         iam.PolicyStatement(
                             actions=["secretsmanager:GetSecretValue"],
-                            resources=[openai_secret.secret_arn],
+                            resources=[
+                                openai_secret.secret_arn,
+                                f"{openai_secret.secret_arn}-*" # Add wildcard version explicitly
+                            ],
+                            effect=iam.Effect.ALLOW
+                        ),
+                        # Grant access to App API Key secret (both base ARN and wildcard ARN)
+                        iam.PolicyStatement(
+                            actions=["secretsmanager:GetSecretValue"],
+                            resources=[
+                                app_api_key_secret.secret_arn,
+                                f"{app_api_key_secret.secret_arn}-*" # Add wildcard version explicitly
+                            ],
                             effect=iam.Effect.ALLOW
                         )
                     ]
@@ -204,6 +205,7 @@ class RagMcpStack(Stack):
         lambda_environment = {
             "DOCUMENTS_S3_BUCKET": documents_bucket.bucket_name,
             "OPENAI_API_KEY_SECRET_NAME": openai_secret.secret_name, # Lambda needs name to fetch value
+            "APP_API_KEY_SECRET_NAME": app_api_key_secret.secret_name, # Add the app API key secret name
             "OPENAI_EMBEDDING_MODEL": openai_embedding_model,
             "OPENAI_CHAT_MODEL": openai_chat_model,
             "OPENSEARCH_COLLECTION_ENDPOINT": collection.attr_collection_endpoint,
@@ -216,7 +218,7 @@ class RagMcpStack(Stack):
             self, "AppLambda",
             runtime=lambda_.Runtime.PYTHON_3_9, # Choose appropriate Python runtime
             handler="src.lambda_handler.main",  # Assuming handler structure is src/lambda_handler.py -> main()
-            code=lambda_.Code.from_asset("./build/lambda_package"), # Point to the build output directory
+            code=lambda_.Code.from_asset("../build/lambda_package"), # CORRECTED: Path relative to infrastructure/ up to root build dir
                                                # Requires a build step to install deps into a specific folder or use layers/containers
             role=lambda_role,
             environment=lambda_environment,
@@ -274,22 +276,13 @@ class RagMcpStack(Stack):
                 {
                     "Rules": [
                         {
-                            "ResourceType": f"collection/{opensearch_collection_name}",
-                            "Permission": [
-                                # "aoss:CreateCollectionItems",
-                                "aoss:DescribeCollectionItems",
-                                # "aoss:UpdateCollectionItems"
-                             ],
-                            "Resource": [f"collection/{opensearch_collection_name}"]
-                        },
-                        {
-                             "ResourceType": "index",
-                             "Resource": [f"index/{opensearch_collection_name}/{opensearch_index_name}*"],
-                             "Permission": ["aoss:*"]
+                            "ResourceType": "index",
+                            "Resource": [f"index/{opensearch_collection_name}/{opensearch_index_name}*"],
+                            "Permission": ["aoss:*"]
                         }
                     ],
                     "Principal": [lambda_role.role_arn], # Use the actual ARN now
-                    "Description": "Policy granting Lambda access to the OpenSearch collection and index"
+                    "Description": "Policy granting Lambda index access"
                 }
             ])
 

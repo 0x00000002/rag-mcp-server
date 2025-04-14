@@ -1,0 +1,7 @@
+{
+  "name": "rag_query",
+  "parameters": {
+    "query": "What information does the first document contain?",
+    "n_results": 2
+  }
+}

@@ -28,14 +28,13 @@ logger = logging.getLogger("rag-mcp-lambda")
 
 # --- Globals / Initialization ---
 # Initialize clients outside the handler for potential reuse across warm invocations
-# REMOVED: openai_client = None - Initialize lazily
 _openai_api_key = None
+_app_api_key = None # Cache for the app API key
 
 def _get_openai_secret() -> str:
     """Fetches the OpenAI API Key from AWS Secrets Manager. Caches the key after first fetch."""
     global _openai_api_key
     if _openai_api_key:
-        # Return cached key
         return _openai_api_key
 
     secret_name = settings.openai_api_key_secret_name
@@ -75,14 +74,50 @@ def _get_openai_secret() -> str:
         logger.error(f"Error parsing secret '{secret_name}': {e}")
         raise e
 
+def _get_app_api_key() -> str:
+    """Fetches the Application API Key from AWS Secrets Manager. Caches the key."""
+    global _app_api_key
+    if _app_api_key:
+        return _app_api_key # Return cached key
+    
+    secret_name = os.environ.get('APP_API_KEY_SECRET_NAME')
+    if not secret_name:
+        logger.error("APP_API_KEY_SECRET_NAME environment variable not set.")
+        raise ValueError("Application API Key secret name configuration is missing.")
+        
+    region_name = os.environ.get('AWS_REGION', settings.aws_region)
+    session = boto3.session.Session()
+    client = session.client(service_name='secretsmanager', region_name=region_name)
+    
+    try:
+        logger.info(f"Fetching app API key secret '{secret_name}' from Secrets Manager")
+        get_secret_value_response = client.get_secret_value(SecretId=secret_name)
+        
+        # Assuming the secret value *is* the API key itself (plain text)
+        if 'SecretString' in get_secret_value_response:
+            api_key = get_secret_value_response['SecretString']
+            _app_api_key = api_key # Cache the key
+            logger.info("Successfully fetched and cached App API Key from Secret.")
+            return _app_api_key
+        else:
+            logger.error(f"Secret '{secret_name}' does not contain a SecretString.")
+            raise ValueError(f"Secret '{secret_name}' for App API Key not found or in wrong format.")
+            
+    except ClientError as e:
+        logger.error(f"Error fetching secret '{secret_name}' for App API Key: {e}")
+        # Handle specific errors like ResourceNotFound separately if needed
+        raise e
+    except Exception as e:
+        logger.error(f"Unexpected error fetching secret '{secret_name}' for App API Key: {e}")
+        raise e
+
 def get_openai_client() -> OpenAI:
     """Gets an initialized OpenAI client, fetching the key if needed."""
     api_key = _get_openai_secret() # Ensures key is fetched and cached
     return OpenAI(api_key=api_key)
 
 def initialize_clients():
-    """Initializes non-lazy clients (OpenSearch)."""
-    # REMOVED: OpenAI client initialization
+    """Initializes non-lazy clients (OpenSearch) and caches secrets."""
     try:
         # Initialize OpenSearch
         logger.info("Initializing OpenSearch client...")
@@ -93,13 +128,18 @@ def initialize_clients():
         )
         create_index_if_not_exists() 
         logger.info("OpenSearch client initialization complete.")
+        
+        # Eagerly fetch/cache secrets during initialization
+        logger.info("Fetching initial secrets...")
+        _get_openai_secret() # Fetch and cache OpenAI key
+        _get_app_api_key() # Fetch and cache App API key
+        logger.info("Secret fetching complete.")
             
     except Exception as e:
-        logger.exception(f"Failed to initialize clients: {e}")
+        logger.exception(f"Failed to initialize clients or fetch initial secrets: {e}")
         raise
 
 # Call initialization logic eagerly when the Lambda environment loads
-# This helps mitigate cold start impact for client setup
 initialize_clients()
 
 # --- MCP Tool Handlers ---
@@ -328,10 +368,29 @@ def handle_list_documents(params: dict):
 
 def main(event, context):
     """Main Lambda handler function invoked by API Gateway."""
-    # Log the incoming event (optional, consider security implications)
-    # logger.debug(f"Received event: {json.dumps(event)}")
-    
     try:
+        # --- API Key Authentication --- 
+        expected_api_key = _get_app_api_key() # Get cached key
+        # API Gateway v2 HTTP API passes headers potentially lowercase
+        headers = event.get('headers', {})
+        provided_api_key = headers.get('x-api-key') # Look for 'x-api-key' header (lowercase)
+
+        # --- Add Debug Logging --- 
+        logger.info(f"API Key Check: Expected key (len={len(expected_api_key) if expected_api_key else 0}): '{expected_api_key.strip() if expected_api_key else 'None'}'")
+        logger.info(f"API Key Check: Provided key (len={len(provided_api_key) if provided_api_key else 0}) from header 'x-api-key': '{provided_api_key.strip() if provided_api_key else 'None'}'")
+        # ---- End Debug ----
+
+        # Use strip() in comparison just in case
+        if not provided_api_key or provided_api_key.strip() != expected_api_key.strip():
+            logger.warning("Unauthorized access attempt: Missing or invalid API Key.")
+            return {
+                "statusCode": 401, # Unauthorized
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"error": "Unauthorized"})
+            }
+        logger.info("API Key validated successfully.")
+        # --- End Authentication ---
+
         # Simple routing based on HTTP method
         http_method = event.get('requestContext', {}).get('http', {}).get('method')
         path = event.get('requestContext', {}).get('http', {}).get('path')

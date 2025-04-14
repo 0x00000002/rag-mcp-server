@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 import os
+import sys
+
+# Add project root to the Python path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
 
 import aws_cdk as cdk
 

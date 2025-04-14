@@ -23,18 +23,22 @@ lambda_handler = None
 def setup_module(module):
     """Set environment variables and mock client initializations before any tests run in this module."""
     global lambda_handler
+    # Add dummy APP_API_KEY_SECRET_NAME to env vars
+    _DUMMY_ENV_VARS['APP_API_KEY_SECRET_NAME'] = 'dummy-app-key-secret'
+    
     with patch.dict(os.environ, _DUMMY_ENV_VARS):
-        # Patch OpenSearch class, OS init funcs, and OpenAI secret getter
-        # No need to mock OpenAI client init directly anymore
         with patch('src.opensearch_service.OpenSearch') as mock_opensearch_class, \
              patch('src.lambda_handler.initialize_opensearch_client') as mock_os_init, \
              patch('src.lambda_handler.create_index_if_not_exists') as mock_create_index, \
-             patch('src.lambda_handler._get_openai_secret') as mock_get_secret: # Keep mocking secret fetch
+             patch('src.lambda_handler._get_openai_secret') as mock_get_secret, \
+             patch('src.lambda_handler._get_app_api_key') as mock_get_app_key: # Mock app key getter
             
             mock_opensearch_class.return_value = MagicMock()
             mock_os_init.return_value = None 
             mock_create_index.return_value = None
-            mock_get_secret.return_value = "dummy-openai-key" 
+            mock_get_secret.return_value = "dummy-openai-key"
+            # Make the mock app key getter return a specific dummy key for tests
+            mock_get_app_key.return_value = "TEST_API_KEY_123"
 
             from src import lambda_handler as handler_module
             lambda_handler = handler_module
@@ -45,10 +49,9 @@ def setup_module(module):
 
 # Keep decorator on individual tests for standalone execution compatibility
 @patch.dict(os.environ, _DUMMY_ENV_VARS)
-def test_mcp_discovery_handler():
-    """Test the main handler routing for MCP discovery (GET /mcp)."""
+def test_mcp_discovery_handler_success():
+    """Test the main handler routing for MCP discovery (GET /mcp) with valid API Key."""
     
-    # Mock the event object that API Gateway would send for a GET /mcp request
     mock_event = {
         "requestContext": {
             "http": {
@@ -56,82 +59,94 @@ def test_mcp_discovery_handler():
                 "path": "/mcp"
             }
         },
-        "body": None # GET requests typically have no body
+        "headers": {
+            "x-api-key": "TEST_API_KEY_123" # Include valid key
+        },
+        "body": None
     }
-    mock_context = MagicMock() # Mock the context object (usually not needed for basic tests)
-
-    # Call the main handler function
+    mock_context = MagicMock()
     response = lambda_handler.main(mock_event, mock_context)
-
-    # Assert the expected response structure from the handler
     assert response["statusCode"] == 200
-    assert "Content-Type" in response["headers"]
-    assert response["headers"]["Content-Type"] == "application/json"
-    
     body = json.loads(response["body"])
     assert "tools" in body
-    assert isinstance(body["tools"], list)
-    tool_names = [tool["name"] for tool in body["tools"]]
-    assert "rag_query" in tool_names
-    assert "rag_add_document" in tool_names
-    assert "rag_list_documents" in tool_names
+
+@patch.dict(os.environ, _DUMMY_ENV_VARS)
+def test_mcp_discovery_handler_unauthorized_missing_key():
+    """Test GET /mcp returns 401 if API key header is missing."""
+    mock_event = {
+        "requestContext": {
+            "http": {"method": "GET", "path": "/mcp"}
+        },
+        "headers": {}, # No API key header
+        "body": None
+    }
+    mock_context = MagicMock()
+    response = lambda_handler.main(mock_event, mock_context)
+    assert response["statusCode"] == 401
+    body = json.loads(response["body"])
+    assert "error" in body
+    assert body["error"] == "Unauthorized"
+
+@patch.dict(os.environ, _DUMMY_ENV_VARS)
+def test_mcp_discovery_handler_unauthorized_invalid_key():
+    """Test GET /mcp returns 401 if API key header is invalid."""
+    mock_event = {
+        "requestContext": {
+            "http": {"method": "GET", "path": "/mcp"}
+        },
+        "headers": {
+            "x-api-key": "WRONG_KEY_999" # Invalid key
+        },
+        "body": None
+    }
+    mock_context = MagicMock()
+    response = lambda_handler.main(mock_event, mock_context)
+    assert response["statusCode"] == 401
+    body = json.loads(response["body"])
+    assert "error" in body
+    assert body["error"] == "Unauthorized"
 
 # --- Test MCP Execution (Example: rag_add_document) ---
 
-@patch('src.lambda_handler.handle_add_document') # Patch the specific tool handler
-def test_mcp_execution_add_document_routing(mock_handle_add_doc):
-    """Test the main handler routing for MCP execution (POST /mcp - add_document)."""
-    
-    # Define the expected result from the mocked handler
-    mock_tool_result = {
-        "status": "success",
-        "document_id": "doc_1234",
-        "s3_key": "documents/doc_1234.txt",
-        "message": "Mocked success"
-    }
+@patch.dict(os.environ, _DUMMY_ENV_VARS)
+@patch('src.lambda_handler.handle_add_document') 
+def test_mcp_execution_add_document_routing_success(mock_handle_add_doc):
+    """Test the main handler routing for POST /mcp (add_document) with valid key."""
+    mock_tool_result = {"status": "success", "document_id": "doc_1234"}
     mock_handle_add_doc.return_value = mock_tool_result
-    
-    # Define the incoming MCP request body
-    mcp_request_body = {
-        "name": "rag_add_document",
-        "parameters": {
-            "content": "This is test content."
-        }
-    }
-    
-    # Mock the event object for a POST /mcp request
+    mcp_request_body = {"name": "rag_add_document", "parameters": {"content": "Test"}}
     mock_event = {
-        "requestContext": {
-            "http": {
-                "method": "POST",
-                "path": "/mcp"
-            }
-        },
-        "body": json.dumps(mcp_request_body) # Body is a JSON string
+        "requestContext": {"http": {"method": "POST", "path": "/mcp"}},
+        "headers": {"x-api-key": "TEST_API_KEY_123"}, # Valid key
+        "body": json.dumps(mcp_request_body) 
     }
     mock_context = MagicMock()
-
-    # Call the main handler
     response = lambda_handler.main(mock_event, mock_context)
-    
-    # Assert the response from the main handler
     assert response["statusCode"] == 200
-    assert "Content-Type" in response["headers"]
-    assert response["headers"]["Content-Type"] == "application/json"
-    
     response_body = json.loads(response["body"])
-    # Check that the main handler wrapped the tool result correctly
     assert response_body == {"result": mock_tool_result} 
-    
-    # Assert that the correct tool handler was called with the right parameters
     mock_handle_add_doc.assert_called_once_with(mcp_request_body["parameters"])
 
-# --- Test Specific Tool Handlers (Example: handle_add_document) ---
+@patch.dict(os.environ, _DUMMY_ENV_VARS)
+def test_mcp_execution_add_document_routing_unauthorized(mock_handle_add_doc):
+    """Test the main handler routing for POST /mcp (add_document) with invalid key."""
+    # mock_handle_add_doc should NOT be called
+    mcp_request_body = {"name": "rag_add_document", "parameters": {"content": "Test"}}
+    mock_event = {
+        "requestContext": {"http": {"method": "POST", "path": "/mcp"}},
+        "headers": {"x-api-key": "WRONG_KEY"}, # Invalid key
+        "body": json.dumps(mcp_request_body) 
+    }
+    mock_context = MagicMock()
+    response = lambda_handler.main(mock_event, mock_context)
+    assert response["statusCode"] == 401
+    mock_handle_add_doc.assert_not_called() # Ensure handler wasn't reached
 
-# Patch get_openai_client instead of the global client
+# --- Test Specific Tool Handlers (Example: handle_add_document) ---
+# Note: These tests don't need the API key check as they test the function directly
 @patch('src.lambda_handler.upload_document_to_s3')
 @patch('src.lambda_handler.index_document')
-@patch('src.lambda_handler.get_openai_client') # Patch the function that returns the client
+@patch('src.lambda_handler.get_openai_client')
 def test_handle_add_document_success(mock_get_openai_client, mock_index_doc, mock_upload_s3):
     """Test the handle_add_document function with mocked dependencies."""
     

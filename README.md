@@ -39,47 +39,35 @@ Before you begin, ensure you have the following installed:
 └── tests/               # Application and infrastructure tests
     ├── test_lambda_handler.py
     └── test_infrastructure.py
+└── example_payloads/    # Example JSON payloads for API requests
+    ├── payload_add.json
+    ├── payload_query.json
+    └── payload_list.json
 ```
 
 ## Setup & Configuration
 
-1.  **Install Dependencies:** From the project root, install Python dependencies for the application and development (including CDK libraries).
+1.  **Install Dependencies:** From the project root, install Python dependencies.
 
     ```bash
     make deps
     ```
 
-    This uses `pip install -e ".[dev]"` based on `pyproject.toml`.
+2.  **AWS Credentials & Permissions:** (Ensure AdministratorAccess or equivalent for deployment).
 
-2.  **AWS Credentials & Permissions:**
+3.  **Create Secrets in AWS Secrets Manager (Target Region):**
 
-    - Ensure your configured AWS CLI profile (default or specified via `AWS_PROFILE` env var/Makefile) is active and has sufficient permissions.
-    - **Permissions Needed:** The deployment (`make deploy`) will create/modify resources like Lambda, API Gateway, OpenSearch Serverless, S3, IAM Roles/Policies, Secrets Manager (reading), CloudFormation, and CloudWatch Logs.
-    - **For initial setup/development:** Using an AWS profile with **AdministratorAccess** is often the simplest way to avoid permission issues, although it's **not recommended for production environments**.
-    - **For production:** Follow the principle of least privilege, creating a dedicated IAM role/user with only the specific permissions required by CDK to manage these resources.
+    - **OpenAI API Key Secret:**
+      - **Name:** `AI/MCP_SERVERS/RAG_SERVER` (or update `stack/rag_mpc_stack.py`)
+      - **Type:** Other type of secret
+      - **Secret key/value:** Add one key `OPENAI_API_KEY` with your `sk-...` key as the value.
+    - **Application API Key Secret:**
+      - **Why:** To authenticate client requests to your deployed API.
+      - **Name:** `App/RagMcp/ApiKey` (or update `stack/rag_mpc_stack.py`)
+      - **Type:** Other type of secret
+      - **Secret value:** Choose **Plaintext** and enter a strong, random API key value that your client application (Agentic AI framework) will use. (e.g., generate a UUID or use a password generator). Do _not_ store it as key/value pairs, just the key string itself.
 
-3.  **OpenAI API Key Secret in AWS Secrets Manager:**
-
-    - **Why?:** Storing secrets like API keys directly in code or environment variables is insecure. AWS Secrets Manager provides a secure way to store and retrieve them.
-    - **Steps:**
-      1.  Log in to the **AWS Management Console**.
-      2.  Navigate to **Secrets Manager**.
-      3.  Ensure you are in the **correct AWS Region** where you intend to deploy the stack (e.g., `eu-west-3`). This _must_ match the deployment region.
-      4.  Click **"Store a new secret"**.
-      5.  Select **"Other type of secret"**.
-      6.  Under **"Secret key/value"**, create **one** key-value pair:
-          - **Key:** `OPENAI_API_KEY`
-          - **Value:** Enter your actual OpenAI API key (e.g., `sk-YourActualOpenAiApiKey`). It should be the key itself, not wrapped in extra quotes _within this field_.
-      7.  Click **Next**.
-      8.  Enter a **Secret name**. The CDK stack expects the name `AI/MCP_SERVERS/RAG_SERVER` by default.
-          - If you use a **different name**, you **must** update the `openai_secret_name` variable in `stack/rag_mpc_stack.py` before deploying.
-      9.  Click **Next** (you can skip rotation settings for now).
-      10. Review and click **"Store"**.
-
-4.  **Environment Variables (Local Use):**
-    - The `.env` file (copied from `.env.example`) is primarily for documenting required variables or potentially for advanced local testing/debugging scenarios if you manually configure access to AWS services locally.
-    - Unit tests (`make test`) mock these variables and external services, so a `.env` file is not strictly required for running tests.
-    - The deployed Lambda function gets its configuration directly from environment variables set by the CDK stack during deployment.
+4.  **Environment Variables (Local Use):** (Not required for testing/deployment).
 
 ## Deployment and Management via Makefile
 
@@ -87,12 +75,12 @@ The `Makefile` provides convenient targets for managing the application lifecycl
 
 **Typical Workflow:**
 
-1.  `make deps` (Install dependencies, needed once or after changes to `pyproject.toml`)
-2.  `make bootstrap` (Bootstrap CDK, needed once per AWS account/region)
-3.  Create the OpenAI Secret in AWS Secrets Manager (see Setup section above).
-4.  `make deploy` (Builds and deploys the stack to AWS)
-5.  `make invoke` / `make logs` / Use the application via its API endpoint.
-6.  `make destroy` (When you want to remove the AWS resources)
+1.  `make deps`
+2.  `make bootstrap`
+3.  **Create BOTH Secrets** (OpenAI Key, App API Key) in AWS Secrets Manager.
+4.  `make deploy`
+5.  `make invoke` / `make logs` / Use the application via its API endpoint (including API Key).
+6.  `make destroy`
 
 **Makefile Targets:**
 
@@ -129,7 +117,11 @@ The `Makefile` provides convenient targets for managing the application lifecycl
 
 - **`make clean`**: Removes local build artifacts (`build/`, `cdk.out`, etc.). Does not affect deployed AWS resources.
 
-- **`make invoke`**: Shows example `curl` commands (using the deployed API Gateway endpoint fetched from stack outputs) to test the MCP discovery and execution endpoints.
+- **`make invoke`**: Shows example `curl` commands for interacting with the deployed API.
+  - First, set the API_KEY and API_URL environment variables as shown by the command output.
+  - Then, run the example `curl` commands.
+  - Note that POST requests use example JSON files from the `example_payloads/` directory.
+  - **Example Deployed URL (from last successful deployment):** `https://9h8ob953ge.execute-api.eu-west-3.amazonaws.com/` (Note: Always use the URL from the `make invoke` output or CloudFormation outputs for the _current_ deployment).
 
 ## Architecture Overview
 
@@ -148,13 +140,36 @@ The `Makefile` provides convenient targets for managing the application lifecycl
 - **Infrastructure:** Modify AWS resources by editing `stack/rag_mpc_stack.py`.
 - **Application Logic:** Modify Lambda behavior by editing files within the `src/` directory.
 
+## Running the Example Script
+
+An example Python script (`example.py`) demonstrates how to interact with the deployed API:
+
+1.  **Deploy the Stack:** Ensure the stack is deployed (`make deploy`).
+2.  **Set Environment Variables:** You need to provide the deployed API URL and your App API Key as environment variables. You can get these using `make invoke` or from the CloudFormation stack outputs.
+
+    ```bash
+    # Get the URL (example)
+    export API_URL=$(aws cloudformation describe-stacks --stack-name RagMcpStack --query "Stacks[0].Outputs[?OutputKey=='ApiGatewayEndpoint'].OutputValue" --output text --profile <YOUR_PROFILE> --region <YOUR_REGION>)
+
+    # Set your key (replace with the actual key from Secrets Manager)
+    export API_KEY="<YOUR_APP_API_KEY>"
+    ```
+
+3.  **Run the Script:**
+    ```bash
+    python example.py
+    ```
+    The script will call the discovery endpoint, add two documents, list documents, and perform a query, printing the requests and responses.
+    _Note:_ The script requires the `requests` library (`pip install requests` if you don't have it, though it should be installed via `make deps`).
+
 ## Common Troubleshooting Tips
 
-- **`ExpiredToken` / `InvalidClientTokenId` errors during `make deploy`/`bootstrap`/etc.:** Your AWS credentials have expired. Refresh them (e.g., `aws sso login`) and try the command again.
-- **Deployment fails mentioning Secrets Manager:** Double-check:
-  - The secret name in `stack/rag_mpc_stack.py` _exactly_ matches the name in AWS Secrets Manager.
-  - The secret exists in the _same region_ you are deploying to.
-  - The secret value contains the correct key (`OPENAI_API_KEY`).
-  - The AWS credentials used for deployment have `secretsmanager:GetSecretValue` permission (usually covered by AdministratorAccess).
-- **Deployment fails with IAM errors:** Ensure the AWS credentials used for deployment have sufficient permissions to create/modify all the required resources (see Permissions Needed in Setup section).
-- **API Gateway returns 5xx errors after deployment:** Check the Lambda function logs using `make logs` for specific errors within the application code.
+- **`ExpiredToken` / `InvalidClientTokenId` errors:** Refresh AWS credentials (`aws sso login`).
+- **Deployment fails mentioning Secrets Manager:** Check:
+  - Secret names in CDK match AWS exactly.
+  - Secrets exist in the _same region_ as deployment.
+  - Secret values are correctly formatted (OpenAI key needs `OPENAI_API_KEY` field, App API Key should be plaintext).
+  - Deployer credentials have `secretsmanager:GetSecretValue` permission.
+- **Deployment fails with IAM errors:** Check deployer permissions.
+- **API Gateway returns 401 Unauthorized:** Ensure the client is sending the correct API key value in the `X-API-Key` header.
+- **API Gateway returns 5xx errors:** Check Lambda logs (`make logs`).

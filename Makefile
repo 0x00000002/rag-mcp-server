@@ -4,8 +4,8 @@
 # Default AWS region (override with environment variable or command line: make deploy AWS_REGION=...)
 AWS_REGION ?= eu-west-3
 # Default AWS profile (override with environment variable or command line: make deploy AWS_PROFILE=...)
-AWS_PROFILE ?= default
-# Get AWS Account ID automatically (requires AWS CLI configured)
+AWS_PROFILE ?= tknff
+# Get AWS Account ID automatically (requires AWS CLI configured and profile to work)
 AWS_ACCOUNT_ID := $(shell aws sts get-caller-identity --query Account --output text --profile $(AWS_PROFILE))
 
 # CDK App Configuration
@@ -44,14 +44,30 @@ deps:
 
 # Build Lambda Package
 .PHONY: build
-build: deps # Ensure dependencies are installed first
-	@echo "---> Building Lambda deployment package in $(PACKAGE_DIR)..."
+build:
+	@echo "---> Building Lambda deployment package in $(PACKAGE_DIR) using Docker..."
 	rm -rf build $(PACKAGE_DIR)
 	mkdir -p $(PACKAGE_DIR)
-	# Install project dependencies into the package directory
-	$(PIP) install . --target $(PACKAGE_DIR)
+	
+	@echo "---> Installing dependencies inside python:3.9-slim container..."
+	# Use Docker to install dependencies in a Lambda-like environment
+	# Mount the current directory to /app in the container
+	# Run pip install targeting the mounted /app/$(PACKAGE_DIR)
+	# Explicitly use linux/amd64 platform and disable pip cache
+	docker run --rm \
+		--platform linux/amd64 \
+		-v "$(shell pwd)":/app \
+		-w /app \
+		python:3.9-slim \
+		pip install --no-cache-dir . --target /app/$(PACKAGE_DIR) # Added --no-cache-dir
+
+	# Check if installation was successful (basic check: check if a key package exists)
+	@if [ ! -d "$(PACKAGE_DIR)/pydantic" ]; then \
+		echo "ERROR: Docker build failed to install dependencies into $(PACKAGE_DIR)."; \
+		exit 1; \
+	fi
+
 	# Copy the application source code into the package directory
-	# Ensure the target directory exists within the package if needed
 	@echo "---> Copying src/ directory..."
 	cp -R src $(PACKAGE_DIR)/
 	@echo "---> Build complete."
@@ -76,42 +92,45 @@ synth:
 
 .PHONY: deploy
 deploy: build
-	@echo "---> Deploying stack $(STACK_NAME) to $(AWS_REGION)..."
+	@echo "---> Deploying stack $(STACK_NAME) to $(AWS_REGION) using profile [$(AWS_PROFILE)]..."
 	cd infrastructure && cdk deploy $(STACK_NAME) --profile $(AWS_PROFILE) --require-approval never
 	@echo "---> Deployment potentially complete. Check AWS console for status."
 
 .PHONY: destroy
 destroy:
-	@echo "---> Destroying stack $(STACK_NAME) from $(AWS_REGION)..."
+	@echo "---> Destroying stack $(STACK_NAME) from $(AWS_REGION) using profile [$(AWS_PROFILE)]..."
 	cd infrastructure && cdk destroy $(STACK_NAME) --profile $(AWS_PROFILE) --force
 	@echo "---> Stack destruction initiated."
 
 # Utility Targets
 .PHONY: logs
 logs:
-	@echo "---> Tailing logs for Lambda function (requires stack deployed and function name output)..."
-	# Get Lambda function name from stack outputs
-	FUNCTION_NAME=$$(aws cloudformation describe-stacks --stack-name $(STACK_NAME) --query "Stacks[0].Outputs[?OutputKey=='LambdaFunctionName'].OutputValue" --output text --profile $(AWS_PROFILE) --region $(AWS_REGION))
-	@if [ -z "$(FUNCTION_NAME)" ]; then \
-		echo "Error: Could not retrieve Lambda function name from stack outputs."; \
-		exit 1; \
-	fi
-	@echo "Tailing logs for function: $(FUNCTION_NAME)... Press Ctrl+C to stop."
-	aws logs tail /aws/lambda/$(FUNCTION_NAME) --follow --profile $(AWS_PROFILE) --region $(AWS_REGION)
+	@echo "---> Tailing logs for Lambda function..."
+	# Use the known function name directly in the aws command
+	# FUNCTION_NAME=RagMcpStack-AppLambda46D23914-YOOlSWvdishr # Hardcoded name from deploy output
+	# export FUNCTION_NAME # Export the variable
+	@echo "Tailing logs for RagMcpStack-AppLambda46D23914-YOOlSWvdishr... Press Ctrl+C to stop."
+	# Use the AWS_PROFILE variable and the hardcoded function name
+	aws logs tail /aws/lambda/RagMcpStack-AppLambda46D23914-YOOlSWvdishr --follow --profile $(AWS_PROFILE) --region $(AWS_REGION)
 
 .PHONY: invoke
 invoke:
-	@echo "---> Example Invocation (Discovery):"
-	@echo "# Get API Gateway endpoint URL:"
-	@echo "API_URL=$$(aws cloudformation describe-stacks --stack-name $(STACK_NAME) --query \"Stacks[0].Outputs[?OutputKey=='ApiGatewayEndpoint'].OutputValue\" --output text --profile $(AWS_PROFILE) --region $(AWS_REGION))"
-	@echo "# Send GET request:"
-	@echo "curl $${API_URL}mcp"
+	@echo "---> Example Invocation (Requires deployed stack and valid API Key)"
+	@echo "# Set environment variables (replace with your actual key):"
+	@echo "export API_KEY='YOUR_APP_API_KEY' # Replace with value from AI/MCP_SERVERS/RAG_SERVER_API_KEY secret"
+	@echo "export API_URL=$$(aws cloudformation describe-stacks --stack-name $(STACK_NAME) --query \"Stacks[0].Outputs[?OutputKey=='ApiGatewayEndpoint'].OutputValue\" --output text --profile $(AWS_PROFILE) --region $(AWS_REGION))"
 	@echo ""
-	@echo "---> Example Invocation (Add Document):"
-	@echo "# Prepare JSON payload in a file (e.g., payload.json):"
-	@echo "# { \"name\": \"rag_add_document\", \"parameters\": { \"content\": \"This is the document content.\" } }"
-	@echo "# Send POST request:"
-	@echo "curl -X POST -H \"Content-Type: application/json\" -d @payload.json $${API_URL}mcp"
+	@echo "# Test Discovery (GET /mcp):"
+	@echo "curl -H \"X-API-Key: $${API_KEY}\" $${API_URL}mcp"
+	@echo ""
+	@echo "# Add Document (POST /mcp using example_payloads/payload_add.json):"
+	@echo "curl -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: $${API_KEY}\" -d @example_payloads/payload_add.json $${API_URL}mcp"
+	@echo ""
+	@echo "# List Documents (POST /mcp using example_payloads/payload_list.json):"
+	@echo "curl -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: $${API_KEY}\" -d @example_payloads/payload_list.json $${API_URL}mcp"
+	@echo ""
+	@echo "# Query Documents (POST /mcp using example_payloads/payload_query.json):"
+	@echo "curl -X POST -H \"Content-Type: application/json\" -H \"X-API-Key: $${API_KEY}\" -d @example_payloads/payload_query.json $${API_URL}mcp"
 
 .PHONY: test
 test: build

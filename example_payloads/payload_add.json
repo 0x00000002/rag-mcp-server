@@ -1,0 +1,14 @@
+{
+  "name": "rag_add_document",
+  "parameters": {
+    "content": "This is the first example document. It contains some basic information for retrieval.",
+    "metadata": {
+      "source": "example_payload",
+      "version": 1,
+      "tags": [
+        "test",
+        "example"
+      ]
+    }
+  }
+}
